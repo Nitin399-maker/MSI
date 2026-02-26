@@ -9,6 +9,13 @@ export const MEDICAL_ANALYSIS_PROMPT = `CRITICAL INSTRUCTIONS FOR COUNTS:
 - missedGamesTotal should be the sum of all missedGames from the "availability.missedGamesBySeason" array
 - DO NOT inflate counts - they must match the actual array lengths
 
+CRITICAL INSTRUCTIONS FOR DATES:
+- Use "YYYY-MM-DD" format ONLY when the full date (year, month, and day) is known
+- If only the year and month are known, use "YYYY-MM" (e.g., "2017-03")
+- If only the year is known, use "YYYY" (e.g., "2017")
+- NEVER use "00" for unknown month or day (e.g., "2017-00-00" is INVALID — use "2017" instead)
+- NEVER pad unknown date parts with zeros
+
 CRITICAL DISTINCTION - Clinical Injuries vs Incidental Findings:
 - Include in "injuries" array ONLY injuries that were clinically diagnosed and discussed by the examining physician
 - Do NOT include incidental imaging findings unless they were the reason for the exam or resulted in treatment/time loss
