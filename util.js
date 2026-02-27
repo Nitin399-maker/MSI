@@ -8,14 +8,7 @@ export const MEDICAL_ANALYSIS_PROMPT = `CRITICAL INSTRUCTIONS FOR COUNTS:
 - minorInjuriesTotal MUST equal the count of injuries with severity="Minor" in the "injuries" array
 - missedGamesTotal should be the sum of all missedGames from the "availability.missedGamesBySeason" array
 - DO NOT inflate counts - they must match the actual array lengths
-
-CRITICAL INSTRUCTIONS FOR DATES:
-- Use "YYYY-MM-DD" format ONLY when the full date (year, month, and day) is known
-- If only the year and month are known, use "YYYY-MM" (e.g., "2017-03")
-- If only the year is known, use "YYYY" (e.g., "2017")
-- NEVER use "00" for unknown month or day (e.g., "2017-00-00" is INVALID — use "2017" instead)
-- NEVER pad unknown date parts with zeros
-
+- CRITICAL: For all date fields, NEVER use "00" for unknown month or day. If only the year is known, use "YYYY-01-01". If the year and month are known but not the day, use the first day of that month (e.g., "YYYY-MM-01"). Never produce dates like "2017-00-00" or "2017-05-00".
 CRITICAL DISTINCTION - Clinical Injuries vs Incidental Findings:
 - Include in "injuries" array ONLY injuries that were clinically diagnosed and discussed by the examining physician
 - Do NOT include incidental imaging findings unless they were the reason for the exam or resulted in treatment/time loss
@@ -105,13 +98,14 @@ Extract and return ONLY a valid JSON object with the following structure (no mar
       "date": "YYYY-MM-DD",
       "bodyRegion": "Head|CervicalSpine|Shoulder|Elbow|WristHand|HipGroin|ThighHamstring|Knee|AnkleFoot|LumbarSpine|Spine|Hip|GreatToe|Other",
       "procedure": "string",
-      "procedureCategory": "Repair|Reconstruction|Arthroscopy|Medial Meniscectomy|Lateral Meniscectomy High-Volume|Meniscectomy (>50%)|ORIF|Tendon Debridement|Aspiration and/or Injection|Other",
+      "procedureCategory": "Repair|Reconstruction|Arthroscopy|Medial Meniscectomy|Lateral Meniscectomy| High-Volume Meniscectomy (>50%)|ORIF|Tendon Debridement|Aspiration and/or Injection|Other",
       "procedureCategoryReason": "Brief explanation of why this procedure category was chosen based on the surgical technique and intervention type (2-3 sentences)",
       "procedureCategorySourceDoc": "Document filename where procedure information was found",
       "procedureCategorySourceQuote": "Exact sentence or phrase from document describing the procedure",
       "side": "Left|Right|Bilateral|NA",
       "majorJoint": true,
       "revision": false,
+      "revisionCount": 0,
       "reasonRelatedInjuryId": "optional reference",
       "clinicalSummary": "1-2 concise sentences summarizing this procedure as a physician would: the indication, what was done, and the outcome/recovery status. Write in plain clinical language suitable for a medical report.",
       "outcome": {
@@ -181,8 +175,63 @@ Extract and return ONLY a valid JSON object with the following structure (no mar
     "structuralRedFlagCount": 0,
     "degenerativeBurdenScore": 0,
     "instabilityBurdenScore": 0
-  }
+  },
+  "generalHealth": [
+    {
+      "condition": "string (exact condition name, e.g., ADHD, Diabetes, Seizure Disorder)",
+      "status": "Active|Controlled|Resolved|Negative",
+      "notes": "string (brief clinical note, e.g., 'managed with medication', 'history of, no current treatment')"
+    }
+  ]
 }
+
+CRITICAL INSTRUCTIONS FOR generalHealth (MMI) EXTRACTION:
+Populate the "generalHealth" array by scanning ALL documents for the conditions listed below.
+For each condition found, record the exact condition name, its current status (Active/Controlled/Resolved/Negative), and a brief note.
+Only include conditions that are explicitly mentioned in the documents. Do NOT fabricate conditions.
+If a condition is described as 'history of', 'denies', 'resolved', 'negative', or 'no current', set status to 'Resolved' or 'Negative'.
+If a condition is currently present, being treated, or requires monitoring, set status to 'Active' or 'Controlled'.
+
+HIGH RISK CONDITIONS to look for (10 pts each if Active/Controlled):
+- Major depressive disorder combined with ADHD and multiple concussion history
+- Any diagnosed significant psychiatric disorder that isn't ADHD/anxiety/depression (e.g., Schizophrenia, Bipolar Disorder, Psychosis)
+- History of cardiac arrhythmia
+- Diagnosed clotting / bleeding disorder other than low platelet count (e.g., Hemophilia, Coagulopathy)
+- Migraines combined with multiple concussion history
+- Substance abuse / Substance use disorder
+- Seizure disorder / Epilepsy
+- Post-concussive syndrome
+- Transient quadriplegia
+- Diagnosed Marfan syndrome
+- Ehlers-Danlos Syndrome
+- Diagnosed Rheumatologic condition (e.g., Rheumatoid Arthritis, Lupus, Ankylosing Spondylitis)
+
+MODERATE RISK CONDITIONS to look for (5 pts each if Active/Controlled):
+- ADHD / Attention Deficit Disorder
+- Depression / Depressive disorder (without psychiatric comorbidities)
+- Hypertension / High blood pressure
+- Diabetes / Elevated glucose / Abnormal fasting glucose / Pre-diabetes
+- Migraines (especially when combined with history of concussions)
+- Hepatitis (any type)
+- Asthma (active or requiring medication)
+- Hearing loss
+- History of DVT / Deep vein thrombosis
+- History of Gout with recurrent episodes or on allopurinol
+- History of rhabdomyolysis due to heat illness
+- Low platelet count / Thrombocytopenia
+- History of GI bleed / Gastrointestinal bleed
+- Chronic Regional Pain syndrome / CRPS
+- Peripheral nerve injury
+- History of vision disorder or eye surgery other than LASIK
+- Untreated sleep apnea or diagnosed sleep disorder
+
+MINOR RISK CONDITIONS to look for (2 pts each if Active/Controlled):
+- Mild, intermittent asthma / bronchospasm
+- 2+ mTBI / Multiple mild traumatic brain injuries
+- Anemia
+- Sickle cell trait
+- Solitary organ (e.g., solitary kidney, solitary testicle)
+- Gout, controlled (no recurrent episodes, not on allopurinol)
 
 Important: 
 - Combine and deduplicate information from all documents
@@ -233,7 +282,7 @@ function typeMultiplier(type, monthsAgo) {
     const t = (type || "").toLowerCase();
     if (t === "fracture") return (monthsAgo !== undefined && monthsAgo <= 24) ? 1.3 : 1.05;
     if (t === "dislocation" || t === "subluxation") return 1.25;
-    if (t === "tear") return 1.2;
+    if (t === "tear") return 1.25;
     if (t === "sprain") return 1.05;
     if (t === "strain") return 1.0;
     if (t === "tendinopathy") return 0.95;
@@ -249,11 +298,11 @@ function procedureMultiplier(cat, monthsAgo) {
     const c = (cat || "").toLowerCase().trim();
     if (c === "reconstruction") return 1.25;
     // Change 3: ORIF multiplier is time-based
-    if (c === "orif") return (monthsAgo !== undefined && monthsAgo <= 12) ? 1.25 : 1.0;
+    if (c === "orif") return (monthsAgo !== undefined && monthsAgo <= 12) ? 1.25 : 1.1;
     if (c === "repair") return 1.2;
     // Change 4: new meniscectomy sub-categories
-    if (c === "lateral meniscectomy high-volume") return 1.2;
-    if (c === "meniscectomy (>50%)") return 1.3;
+    if (c === "lateral meniscectomy") return 1.2;
+    if (c === "high-volume meniscectomy (>50%)") return 1.3;
     if (c === "medial meniscectomy" || c === "meniscectomy") return 1.0;
     if (c === "arthroscopy") return 0.9;
     if (c === "tendon debridement") return 0.85;
@@ -379,8 +428,7 @@ export function calculateMSI(facts, asOfDateStr) {
 
     const chains = new Map();
     function ensure(chainId) {
-        // Change 6: Added revisionCount field to chain to track 2nd revision bonus
-        if (!chains.has(chainId)) chains.set(chainId, { injuryMax: 0, surgeryMax: 0, imagingMax: 0, incremental: 0, revisionCount: 0 });
+        if (!chains.has(chainId)) chains.set(chainId, { injuryMax: 0, surgeryMax: 0, imagingMax: 0, incremental: 0 });
         return chains.get(chainId);
     }
 
@@ -389,14 +437,14 @@ export function calculateMSI(facts, asOfDateStr) {
         const c = ensure(chainId);
 
         const monthsAgo = inj?.date ? monthsBetween(inj.date, asOf) : 24;
-        // Change 8: Updated half-lives — Major/Severe: 48mo, Moderate: 30mo, Minor/Mild: 18mo
+        // Change 8 (revised): Use "Acceptable for 50% reduction" column values instead of Half-Life:
+        //   Major/Severe injury: 24mo, Moderate injury: 12mo, Minor/Mild injury: 6mo
         const sev = (inj?.severity || "").toLowerCase();
-        const hl = (sev === "major" || sev === "severe") ? 48 : (sev === "moderate" ? 30 : 18);
+        const hl = (sev === "major" || sev === "severe") ? 24 : (sev === "moderate" ? 12 : 6);
         // Change 2: Pass monthsAgo to typeMultiplier for fracture time-based multiplier
         let p = sevWeight(inj?.severity) * typeMultiplier(inj?.type, monthsAgo) * decay(monthsAgo, hl);
 
         if (inj?.treatment?.surgery) p *= 0.35;
-        if (inj?.recurrenceGroupId) c.incremental += 1.5 * decay(monthsAgo, 36);
 
         c.injuryMax = Math.max(c.injuryMax, p);
     }
@@ -411,8 +459,9 @@ export function calculateMSI(facts, asOfDateStr) {
         const c = ensure(chainId);
 
         const monthsAgo = sx?.date ? monthsBetween(sx.date, asOf) : 60;
-        // Change 8: Updated half-lives — Major Joint Surgery: 72mo, Standard Surgery: 60mo
-        const hl = sx?.majorJoint ? 72 : 60;
+        // Change 8 (revised): Use "Acceptable for 50% reduction" column values:
+        //   Major Joint Surgery: 36mo, Standard Surgery: 24mo
+        const hl = sx?.majorJoint ? 36 : 24;
 
         const base = sx?.majorJoint ? 6 : 4;
 
@@ -420,17 +469,12 @@ export function calculateMSI(facts, asOfDateStr) {
         let procMult = procedureMultiplier(sx?.procedureCategory, monthsAgo);
         if (procMult === null) {
             // Change 5: Aspiration and/or Injection — count<2 => 0.5x, count>=2 => 0.75x
-            procMult = aspirationCount < 2 ? 0.5 : 0.75;
+            procMult = aspirationCount <= 2 ? 0.5 : 0.75;
         }
 
-        // Change 6: 2nd revision factor — first revision adds 3 pts, a 2nd revision adds an
-        //   additional 2 pts on top (total +5 for surgeries marked revision twice in same chain)
+        // Change 6: revision adds 3 pts; if revisionCount (from LLM) >= 2, add 6 pts bonus
         const revision = sx?.revision ? 3 : 0;
-        // Track revision count per chain to apply 2nd revision bonus later
-        if (sx?.revision) {
-            c.revisionCount = (c.revisionCount || 0) + 1;
-        }
-        const secondRevisionBonus = (c.revisionCount || 0) >= 2 ? 2 : 0;
+        const secondRevisionBonus = (sx?.revisionCount != null ? sx.revisionCount : 0) >= 2 ? 6 : 0;
 
         const residual = residualPenalty(sx?.outcome?.residualSymptoms);
         const limitation = limitationPenalty(sx?.outcome?.currentLimitation);
@@ -438,7 +482,8 @@ export function calculateMSI(facts, asOfDateStr) {
         const p = (base * procMult + revision + secondRevisionBonus + residual + limitation) * decay(monthsAgo, hl);
 
         c.surgeryMax = Math.max(c.surgeryMax, p);
-        c.incremental += (revision + secondRevisionBonus + residual + limitation) * 0.35 * decay(monthsAgo, 72);
+        // Change 8 (revised): Incremental surgery decay uses revised major joint acceptable value = 36mo
+        c.incremental += (revision + secondRevisionBonus + residual + limitation) * 0.35 * decay(monthsAgo, 36);
     }
 
     for (const img of imgs) {
@@ -452,17 +497,20 @@ export function calculateMSI(facts, asOfDateStr) {
         //   All other structural flags (nonunion, AVN, hardware, loose bodies) removed from imaging loop
         //   and handled exclusively through redFlagPenalty
         const structural = sf.stressReactionOrFracture ? 3 : 0;
-        // Change 8: Structural Imaging half-life = 84 months
-        const structuralPart = structural * decay(monthsAgo, 84);
+        // Change 8 (revised): Structural Imaging uses "Acceptable" value = 36 months
+        const structuralPart = structural * decay(monthsAgo, 36);
 
-        // Change 8: Major/Soft Tissue imaging (labrum, tendon, ligament) half-life = 48 months
+        // Change 8 (revised): Major/Soft Tissue imaging uses "Acceptable" value = 24 months
         const softTissuePart =
             (labrumMeniscusPenalty(sf.labrumMeniscusStatus) +
              tendonPenalty(sf.tendonStatus) +
              ligamentPenalty(sf.ligamentStatus) +
-             effusionPenalty(sf.effusion)) * decay(monthsAgo, 48);
+             effusionPenalty(sf.effusion)) * decay(monthsAgo, 24);
 
-        const p = structuralPart + softTissuePart;
+        // Change 8 (new row): Degenerative Imaging (e.g., Arthritis) uses 120-month half-life
+        const degenerativePart = degenerativePenalty(sf.degenerativeChange) * decay(monthsAgo, 120);
+
+        const p = structuralPart + softTissuePart + degenerativePart;
         c.imagingMax = Math.max(c.imagingMax, p);
     }
 
@@ -516,9 +564,6 @@ export function calculateMSI(facts, asOfDateStr) {
     // Change 9: Recurrent Muscle Strain (Different Muscle): 2.0 pts (new flag)
     if (flags.recurrentMuscleStrainDifferentMuscle) redFlagPenalty += 2.0;
 
-    redFlagPenalty += 1.5 * (scoringInputs.structuralRedFlagCount || 0);
-    redFlagPenalty += 0.75 * (scoringInputs.degenerativeBurdenScore || 0);
-    redFlagPenalty += 1 * (scoringInputs.instabilityBurdenScore || 0);
 
     const avail = facts?.availability || {};
     const bySeason = avail?.missedGamesBySeason || [];
@@ -538,23 +583,28 @@ export function calculateMSI(facts, asOfDateStr) {
             const yearsAgo = Math.max(0, baseYear - (s.season || baseYear));
             const recencyFactor = Math.pow(0.8, yearsAgo);
             const mg = s.missedGames || 0;
-            // First 8 missed games at 1.5x, remainder at 0.6x
-            const seasonPenalty = (1.5 * Math.min(mg, 8) + 0.6 * Math.max(mg - 8, 0)) * recencyFactor;
-            rawMissedGamesPenalty += seasonPenalty;
-
-            // Change 12: Load-manage flag — player played >10 games but missed >6 practice weeks
+            // Change 11 (revised): Sum missed games penalty + practice/limited week penalties first,
+            //   then multiply the entire season total by recencyFactor (0.8^yearsAgo)
             const practiceWeeksMissed = s.missedPracticeWeeks || 0;
+            const seasonRaw = (1.5 * Math.min(mg, 8) + 0.6 * Math.max(mg - 8, 0))
+                + 0.5 * practiceWeeksMissed
+                + 0.25 * (s.limitedParticipationWeeks || 0);
+            rawMissedGamesPenalty += seasonRaw * recencyFactor;
+
+            // Change 12: Load-manage flag — player missed >6 practice weeks
             const gamesPlayed = s.gamesPlayed || 0;
-            if (gamesPlayed > 10 && practiceWeeksMissed > 6) {
-                loadManagePenalty += 2.5;
+            if (practiceWeeksMissed > 6) {
+                loadManagePenalty += 2.5 * recencyFactor;
             }
         }
     }
 
+    // Change 11 (revised): Per-season values already include practice/limited week contributions;
+    //   top-level totals (missedPracticeWeeksTotal, limitedParticipationWeeksTotal) are kept as
+    //   a fallback for players with no season-by-season breakdown.
     const availabilityPenalty =
         rawMissedGamesPenalty +
-        0.5 * (avail.missedPracticeWeeksTotal || 0) +
-        0.25 * (avail.limitedParticipationWeeksTotal || 0) +
+        (bySeason.length === 0 ? (0.5 * (avail.missedPracticeWeeksTotal || 0) + 0.25 * (avail.limitedParticipationWeeksTotal || 0)) : 0) +
         loadManagePenalty;
 
     const restr = (avail.currentRestrictions || "Unknown").toLowerCase();
@@ -620,7 +670,7 @@ export function calculateMSI(facts, asOfDateStr) {
         if (currMissed > prevMissed) {
             // Escalated Time Loss (current > previous): +2.0 pts * decay (36-month half-life)
             neuroPenalty += 2.0 * decay(monthsAgoForCurr, 36);
-        } else if (currMissed === prevMissed && currMissed > 1) {
+        } else if (currMissed === prevMissed && currMissed >= 1) {
             // Stagnant High Time Loss (current = previous and >1 games): +1.0 pts * decay (36-month half-life)
             neuroPenalty += 1.0 * decay(monthsAgoForCurr, 36);
         }
@@ -646,8 +696,38 @@ export function calculateMSI(facts, asOfDateStr) {
         neuroPenalty += p;
     }
 
-    const mLast = scoringInputs.monthsSinceLastSignificantEvent ?? null;
-    const monthsSinceLast = (mLast != null) ? mLast : 18;
+    // Compute recency boost from symptomatic events only (injuries/surgeries that are active,
+    // and imaging findings only when they map to a symptomatic injury by bodyRegion+side).
+    // Purely incidental/asymptomatic imaging findings do NOT trigger the boost.
+    const symptomaticMonthsAgo = [];
+
+    // 1. Injuries that are currently Symptomatic or Ongoing
+    for (const inj of injuries) {
+        if (inj?.date && (inj.currentStatus === 'Symptomatic' || inj.currentStatus === 'Ongoing')) {
+            symptomaticMonthsAgo.push(monthsBetween(inj.date, asOf));
+        }
+    }
+
+    // 2. All surgeries are inherently clinically significant
+    for (const sx of surgeries) {
+        if (sx?.date) symptomaticMonthsAgo.push(monthsBetween(sx.date, asOf));
+    }
+
+    // 3. Imaging findings — only if they correspond to a symptomatic injury (same bodyRegion + side)
+    const symptomaticInjuryKeys = new Set(
+        injuries
+            .filter(inj => inj.currentStatus === 'Symptomatic' || inj.currentStatus === 'Ongoing')
+            .map(inj => `${inj.bodyRegion}|${inj.side}`)
+    );
+    for (const img of imgs) {
+        if (img?.date && symptomaticInjuryKeys.has(`${img.bodyRegion}|${img.side}`)) {
+            symptomaticMonthsAgo.push(monthsBetween(img.date, asOf));
+        }
+    }
+
+    const monthsSinceLast = symptomaticMonthsAgo.length > 0
+        ? Math.min(...symptomaticMonthsAgo)
+        : 18;
 
     const recentBoost = clamp((12 - monthsSinceLast) / 12, 0, 1) * 0.25;
 
@@ -682,6 +762,121 @@ export function calculateMSI(facts, asOfDateStr) {
             neuroPenalty: +validNeuroPenalty.toFixed(1),
             recentBoostMultiplier: +(1 + validRecentBoost).toFixed(3),
             totalPenalty: +validTotalPenalty.toFixed(1)
+        }
+    };
+}
+
+// ========== MMI SCORE CALCULATION ==========
+// High Risk conditions (10 pts each) — active/controlled only
+const MMI_HIGH_RISK_PATTERNS = [
+    /major depressive disorder.*adhd|adhd.*major depressive/i,
+    /significant psychiatric/i,
+    /schizophreni/i,
+    /bipolar/i,
+    /psychosis|psychotic/i,
+    /cardiac arrhythmia/i,
+    /arrhythmia/i,
+    /clotting disorder|bleeding disorder|coagulopathy/i,
+    /migraine.*concussion|concussion.*migraine/i,
+    /substance abuse|substance use disorder/i,
+    /seizure disorder|epilepsy/i,
+    /post.concussive syndrome|post-concussion syndrome/i,
+    /transient quadriplegia/i,
+    /marfan syndrome/i,
+    /ehlers.danlos/i,
+    /rheumatoid arthritis|lupus|ankylosing spondylitis|rheum condition|diagnosed rheum/i,
+];
+
+// Moderate Risk conditions (5 pts each)
+const MMI_MODERATE_RISK_PATTERNS = [
+    /\badhd\b|attention deficit/i,
+    /\bdepression\b|depressive disorder/i,
+    /hypertension|high blood pressure/i,
+    /\bdiabetes\b|diabetic|elevated glucose|abnormal fasting glucose/i,
+    /\bmigraine/i,
+    /hepatitis/i,
+    /\basthma\b/i,
+    /hearing loss/i,
+    /\bdvt\b|deep vein thrombosis/i,
+    /\bgout\b.*recurrent|allopurinol/i,
+    /rhabdomyolysis/i,
+    /low platelet|thrombocytopenia/i,
+    /gi bleed|gastrointestinal bleed/i,
+    /chronic regional pain|crps/i,
+    /peripheral nerve injury/i,
+    /vision disorder|eye surgery(?!.*lasik)/i,
+    /sleep apnea|sleep disorder/i,
+];
+
+// Minor Risk conditions (2 pts each)
+const MMI_MINOR_RISK_PATTERNS = [
+    /intermittent asthma|mild asthma|bronchospasm/i,
+    /\banemia\b/i,
+    /sickle cell/i,
+    /solitary organ|solitary kidney|solitary testicle/i,
+    /\bgout\b(?!.*recurrent|.*allopurinol)/i,
+];
+
+// Resolved/negative phrases that disqualify a condition from scoring
+const RESOLVED_PATTERNS = [
+    /resolved|negative|denies|no history|no current|no longer|childhood|complete|cleared|remission/i,
+];
+
+function mmiRiskLevel(condition, status) {
+    const s = (status || "").toLowerCase();
+    // Step 1: Filter — resolved/negative conditions score 0
+    if (s === "resolved" || s === "negative") return null;
+    if (RESOLVED_PATTERNS.some(p => p.test(condition))) return null;
+
+    // Step 2: Match risk tier
+    if (MMI_HIGH_RISK_PATTERNS.some(p => p.test(condition))) return "high";
+    if (MMI_MODERATE_RISK_PATTERNS.some(p => p.test(condition))) return "moderate";
+    if (MMI_MINOR_RISK_PATTERNS.some(p => p.test(condition))) return "minor";
+    return null; // clean / no match
+}
+
+export function calculateMMI(facts) {
+    const generalHealth = Array.isArray(facts?.generalHealth) ? facts.generalHealth : [];
+
+    const highConditions = [];
+    const moderateConditions = [];
+    const minorConditions = [];
+
+    for (const item of generalHealth) {
+        const level = mmiRiskLevel(item.condition || "", item.status || "");
+        if (level === "high") highConditions.push(item.condition);
+        else if (level === "moderate") moderateConditions.push(item.condition);
+        else if (level === "minor") minorConditions.push(item.condition);
+    }
+
+    const totalPoints =
+        highConditions.length * 10 +
+        moderateConditions.length * 5 +
+        minorConditions.length * 2;
+
+    let managementLevel, clinicalAction;
+    if (totalPoints >= 15) {
+        managementLevel = "High Management";
+        clinicalAction = "Requires daily check-ins and multi-specialist coordination";
+    } else if (totalPoints >= 5) {
+        managementLevel = "Moderate Management";
+        clinicalAction = "Needs a dedicated medical plan";
+    } else {
+        managementLevel = "Low Management";
+        clinicalAction = "Standard player care";
+    }
+
+    return {
+        mmi: totalPoints,
+        managementLevel,
+        clinicalAction,
+        breakdown: {
+            highCount: highConditions.length,
+            moderateCount: moderateConditions.length,
+            minorCount: minorConditions.length,
+            highConditions,
+            moderateConditions,
+            minorConditions
         }
     };
 }
