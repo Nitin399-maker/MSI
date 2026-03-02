@@ -9,6 +9,7 @@ export const MEDICAL_ANALYSIS_PROMPT = `CRITICAL INSTRUCTIONS FOR COUNTS:
 - missedGamesTotal should be the sum of all missedGames from the "availability.missedGamesBySeason" array
 - For each season entry, missedGames MUST equal firstGamesMissed + additionalGamesMissed + lastGamesMissed
 - DO NOT inflate counts - they must match the actual array lengths
+-CRITICAL : Must and Must return the valid json as a response.
 - CRITICAL: For all date fields, NEVER use "00" for unknown month or day. If only the year is known, use "YYYY-01-01". If the year and month are known but not the day, use the first day of that month (e.g., "YYYY-MM-01"). Never produce dates like "2017-00-00" or "2017-05-00".
 - CRITICAL: Every entry in "injuries", "surgeries", and "imagingFindings" MUST include both "side" (Left|Right|Bilateral|NA) and "structure" (the specific anatomical structure affected, e.g., ACL, rotator cuff, labrum, meniscus). Never omit these fields. Use "Unknown" for structure only if the document truly does not specify the structure.
 CRITICAL DISTINCTION - Clinical Injuries vs Incidental Findings:
@@ -254,7 +255,7 @@ Important:
 - Fill in all required fields with best estimates from documents
 - CRITICAL: Ensure summaryCounts values match the actual array lengths (e.g., surgeriesTotal = surgeries.length)
 - Set flags to true ONLY when there is clear evidence in the imaging findings or medical history
-- Must and must return the valid json`;
+`;
 
 // ========== MEDICAL SCORE CALCULATION ==========
 function clamp(x, min, max) {
