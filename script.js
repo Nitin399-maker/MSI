@@ -29,7 +29,7 @@ function getScoreLabel(score) {
     }
     const validScore = Math.max(0, Math.min(100, score));
     if (validScore >= 75) return { label: "Low Risk", class: "score-low", badge: "success" };
-    if (validScore >= 50) return { label: "Moderate Risk", class: "score-medium", badge: "warning" };
+    if (validScore >= 51) return { label: "Moderate Risk", class: "score-medium", badge: "warning" };
     return { label: "High Risk", class: "score-high", badge: "danger" };
 }
 
@@ -78,6 +78,7 @@ function recalculateScores() {
                 redFlagPenalty: 0,
                 availabilityPenalty: 0,
                 neuroPenalty: 0,
+                totalBasePenalty: 0,
                 recentBoostMultiplier: 1.0,
                 totalPenalty: 0
             };
@@ -448,13 +449,17 @@ function renderPlayerDashboard(playerId) {
                 <div class="text-center mb-3">
                     <div class="score-circle ${scoreInfo.class}" style="width:120px;height:120px;font-size:2.4rem;margin:0 auto;">${player.score}</div>
                     <div class="mt-2 fw-bold fs-5">MSI <small class="text-muted fw-normal" style="font-size:0.8rem;">Medical Score Index</small></div>
-                    <div class="text-muted small mb-1" style="font-size:0.75rem;">(0–100) &nbsp;·&nbsp; 0 = Highest Risk &nbsp;·&nbsp; 100 = No Risk</div>
+                    <div class="text-muted small mb-1" style="font-size:0.75rem;">
+                        <span class="me-2"><span class="badge bg-danger">0–49</span> High Risk</span>
+                        <span class="me-2"><span class="badge bg-warning text-dark">50–74</span> Moderate Risk</span>
+                        <span><span class="badge bg-success">≥75</span> Low Risk</span>
+                    </div>
                     <h6 class="mt-1"><span class="badge bg-${scoreInfo.badge}">${scoreInfo.label}</span></h6>
                     <div class="progress mt-2" style="height: 18px;">
                         <div class="progress-bar bg-${scoreInfo.badge}" role="progressbar" style="width: ${player.score}%">${player.score}%</div>
                     </div>
                 </div>
-                <h6 class="border-top pt-2">Score Calculation (Waterfall)</h6>
+                <h6 class="border-top pt-2">Score Calculation</h6>
                 <div style="font-size:0.88rem;">
                     <div class="d-flex justify-content-between align-items-center py-1 border-bottom">
                         <span><i class="bi bi-flag-fill text-success me-1"></i><strong>Base Score</strong></span>
@@ -466,6 +471,10 @@ function renderPlayerDashboard(playerId) {
                         <span class="fw-bold">−${e.value.toFixed(1)}</span>
                     </div>`).join('') : '<div class="py-1 text-muted">No deductions</div>'}
                     ${player.scoreBreakdown ? `
+                    <div class="d-flex justify-content-between align-items-center py-1 border-bottom text-secondary">
+                        <span><i class="bi bi-sigma me-1"></i><strong>Total Base Penalty</strong></span>
+                        <span class="fw-bold">−${player.scoreBreakdown.totalBasePenalty.toFixed(1)}</span>
+                    </div>
                     <div class="d-flex justify-content-between align-items-center py-1 border-bottom" style="color:#6f42c1;">
                         <span><i class="bi bi-lightning-fill me-1"></i><strong>Recency Boost</strong> <small class="fw-normal">(×${player.scoreBreakdown.recentBoostMultiplier})</small></span>
                         <span class="fw-bold">×${player.scoreBreakdown.recentBoostMultiplier}</span>
@@ -494,7 +503,7 @@ function renderPlayerDashboard(playerId) {
             <div class="h-100 p-3 rounded border">
                 <div class="text-center mb-3">
                     <div class="score-circle ${mmiClass}" style="width:120px;height:120px;font-size:2.4rem;margin:0 auto;">${mmiScore}</div>
-                    <div class="mt-2 fw-bold fs-5">MMI <small class="text-muted fw-normal" style="font-size:0.8rem;">Medical Management Inventory</small></div>
+                    <div class="mt-2 fw-bold fs-5">MMI <small class="text-muted fw-normal" style="font-size:0.8rem;">Medical Management Index</small></div>
                     <h6 class="mt-1"><span class="badge bg-${mmiBadge}">${mmiLabel}</span></h6>
                 </div>
                 <h6 class="border-top pt-2">Operational Summary</h6>

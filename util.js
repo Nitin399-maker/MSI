@@ -7,8 +7,10 @@ export const MEDICAL_ANALYSIS_PROMPT = `CRITICAL INSTRUCTIONS FOR COUNTS:
 - moderateInjuriesTotal MUST equal the count of injuries with severity="Moderate" in the "injuries" array
 - minorInjuriesTotal MUST equal the count of injuries with severity="Minor" in the "injuries" array
 - missedGamesTotal should be the sum of all missedGames from the "availability.missedGamesBySeason" array
+- For each season entry, missedGames MUST equal firstGamesMissed + additionalGamesMissed + lastGamesMissed
 - DO NOT inflate counts - they must match the actual array lengths
 - CRITICAL: For all date fields, NEVER use "00" for unknown month or day. If only the year is known, use "YYYY-01-01". If the year and month are known but not the day, use the first day of that month (e.g., "YYYY-MM-01"). Never produce dates like "2017-00-00" or "2017-05-00".
+- CRITICAL: Every entry in "injuries", "surgeries", and "imagingFindings" MUST include both "side" (Left|Right|Bilateral|NA) and "structure" (the specific anatomical structure affected, e.g., ACL, rotator cuff, labrum, meniscus). Never omit these fields. Use "Unknown" for structure only if the document truly does not specify the structure.
 CRITICAL DISTINCTION - Clinical Injuries vs Incidental Findings:
 - Include in "injuries" array ONLY injuries that were clinically diagnosed and discussed by the examining physician
 - Do NOT include incidental imaging findings unless they were the reason for the exam or resulted in treatment/time loss
@@ -50,8 +52,19 @@ Extract and return ONLY a valid JSON object with the following structure (no mar
   },
   "availability": {
     "missedGamesBySeason": [
-      { "season": 2022, "missedGames": 0, "gamesPlayed": 0, "missedPracticeWeeks": 0, "reason": "string" }
+      {
+        "season": 2022,
+        "seasonWindow": "Mar 2022 – Feb 2023",
+        "missedGames": 0,
+        "firstGamesMissed": 0,
+        "additionalGamesMissed": 0,
+        "lastGamesMissed": 0,
+        "gamesPlayed": 0,
+        "missedPracticeWeeks": 0,
+        "reason": "string"
+      }
     ],
+    "_seasonWindowNote": "Each NFL season window runs from March of that year through February of the following year (e.g., season 2022 = Mar 2022 – Feb 2023). Within each season window, categorize missed games as: firstGamesMissed = games missed at the very start of the season (training camp / early regular season), additionalGamesMissed = games missed mid-season due to additional injuries or setbacks, lastGamesMissed = games missed at the end of the season (final stretch / playoffs). missedGames must equal firstGamesMissed + additionalGamesMissed + lastGamesMissed.",
     "missedPracticeWeeksTotal": 0,
     "limitedParticipationWeeksTotal": 0,
     "currentRestrictions": "None|Limited|NoCombine|ProDayOnly|Unknown",
@@ -74,7 +87,6 @@ Extract and return ONLY a valid JSON object with the following structure (no mar
       "severitySourceDoc": "Document filename where severity information was found",
       "severitySourceQuote": "Exact sentence or phrase from document supporting this severity classification",
       "mechanism": "Contact|NonContact|Overuse|Unknown",
-      "recurrenceGroupId": "string-or-null",
       "treatment": {
         "surgery": false,
         "injection": "None|PRP|Cortisone|Other|Unknown",
@@ -97,16 +109,16 @@ Extract and return ONLY a valid JSON object with the following structure (no mar
     {
       "date": "YYYY-MM-DD",
       "bodyRegion": "Head|CervicalSpine|Shoulder|Elbow|WristHand|HipGroin|ThighHamstring|Knee|AnkleFoot|LumbarSpine|Spine|Hip|GreatToe|Other",
+      "side": "Left|Right|Bilateral|NA",
+      "structure": "string (e.g., ACL, rotator cuff, meniscus — REQUIRED, use 'Unknown' if not specified)",
       "procedure": "string",
       "procedureCategory": "Repair|Reconstruction|Arthroscopy|Medial Meniscectomy|Lateral Meniscectomy| High-Volume Meniscectomy (>50%)|ORIF|Tendon Debridement|Aspiration and/or Injection|Other",
       "procedureCategoryReason": "Brief explanation of why this procedure category was chosen based on the surgical technique and intervention type (2-3 sentences)",
       "procedureCategorySourceDoc": "Document filename where procedure information was found",
       "procedureCategorySourceQuote": "Exact sentence or phrase from document describing the procedure",
-      "side": "Left|Right|Bilateral|NA",
       "majorJoint": true,
       "revision": false,
       "revisionCount": 0,
-      "reasonRelatedInjuryId": "optional reference",
       "clinicalSummary": "1-2 concise sentences summarizing this procedure as a physician would: the indication, what was done, and the outcome/recovery status. Write in plain clinical language suitable for a medical report.",
       "outcome": {
         "returnedToPlay": true,
@@ -124,6 +136,7 @@ Extract and return ONLY a valid JSON object with the following structure (no mar
       "modality": "MRI|XR|CT|US|Other",
       "bodyRegion": "Head|CervicalSpine|Shoulder|Elbow|WristHand|HipGroin|ThighHamstring|Knee|AnkleFoot|LumbarSpine|Spine|Hip|GreatToe|Other",
       "side": "Left|Right|Bilateral|NA",
+      "structure": "string (e.g., ACL, rotator cuff, meniscus — REQUIRED, use 'Unknown' if not specified)",
       "sourceDoc": "string",
       "structuredFindings": {
         "degenerativeChange": "None|Mild|Moderate|Severe|Unknown",
@@ -331,22 +344,7 @@ function limitationPenalty(lim) {
     }
 }
 
-function cartilagePenalty(level) {
-    const v = (level || "").toLowerCase();
-    if (v === "fullthickness") return 5;
-    if (v === "severe") return 3.5;
-    if (v === "moderate") return 2;
-    if (v === "mild") return 1;
-    return 0;
-}
 
-function degenerativePenalty(level) {
-    const v = (level || "").toLowerCase();
-    if (v === "severe") return 3.5;
-    if (v === "moderate") return 2;
-    if (v === "mild") return 1;
-    return 0;
-}
 
 function labrumMeniscusPenalty(status) {
     const s = (status || "").toLowerCase();
@@ -380,23 +378,27 @@ function effusionPenalty(level) {
 }
 
 function buildChainIdForInjury(inj) {
-    if (inj?.recurrenceGroupId) return `rg:${inj.recurrenceGroupId}`;
-    const key = [
+    return [
         inj?.bodyRegion || "Other",
         inj?.side || "NA",
         inj?.structure || "Unknown"
     ].join("|");
-    return `inj:${key}`;
 }
 
 function buildChainIdForSurgery(surg) {
-    if (surg?.reasonRelatedInjuryId) return `injId:${surg.reasonRelatedInjuryId}`;
-    const key = [surg?.bodyRegion || "Other", surg?.side || "NA"].join("|");
-    return `sx:${key}`;
+    return [
+        surg?.bodyRegion || "Other",
+        surg?.side || "NA",
+        surg?.structure || "Unknown"
+    ].join("|");
 }
 
 function imagingChainKey(img) {
-    return `img:${[img?.bodyRegion || "Other", img?.side || "NA"].join("|")}`;
+    return [
+        img?.bodyRegion || "Other",
+        img?.side || "NA",
+        img?.structure || "Unknown"
+    ].join("|");
 }
 
 export function calculateMSI(facts, asOfDateStr) {
@@ -428,7 +430,7 @@ export function calculateMSI(facts, asOfDateStr) {
 
     const chains = new Map();
     function ensure(chainId) {
-        if (!chains.has(chainId)) chains.set(chainId, { injuryMax: 0, surgeryMax: 0, imagingMax: 0, incremental: 0 });
+        if (!chains.has(chainId)) chains.set(chainId, { injuryMax: 0, surgeryMax: 0, imagingMax: 0 });
         return chains.get(chainId);
     }
 
@@ -455,7 +457,7 @@ export function calculateMSI(facts, asOfDateStr) {
     ).length;
 
     for (const sx of surgeries) {
-        const chainId = sx?.reasonRelatedInjuryId ? `injId:${sx.reasonRelatedInjuryId}` : buildChainIdForSurgery(sx);
+        const chainId = buildChainIdForSurgery(sx);
         const c = ensure(chainId);
 
         const monthsAgo = sx?.date ? monthsBetween(sx.date, asOf) : 60;
@@ -482,13 +484,14 @@ export function calculateMSI(facts, asOfDateStr) {
         const p = (base * procMult + revision + secondRevisionBonus + residual + limitation) * decay(monthsAgo, hl);
 
         c.surgeryMax = Math.max(c.surgeryMax, p);
-        // Change 8 (revised): Incremental surgery decay uses revised major joint acceptable value = 36mo
-        c.incremental += (revision + secondRevisionBonus + residual + limitation) * 0.35 * decay(monthsAgo, 36);
     }
 
     for (const img of imgs) {
         const chainId = imagingChainKey(img);
-        const c = ensure(chainId);
+        // Only score imaging if it belongs to an existing injury or surgery chain.
+        // Purely incidental findings with no matching injury/surgery are excluded entirely.
+        if (!chains.has(chainId)) continue;
+        const c = chains.get(chainId);
 
         const monthsAgo = img?.date ? monthsBetween(img.date, asOf) : 24;
 
@@ -507,17 +510,14 @@ export function calculateMSI(facts, asOfDateStr) {
              ligamentPenalty(sf.ligamentStatus) +
              effusionPenalty(sf.effusion)) * decay(monthsAgo, 24);
 
-        // Change 8 (new row): Degenerative Imaging (e.g., Arthritis) uses 120-month half-life
-        const degenerativePart = degenerativePenalty(sf.degenerativeChange) * decay(monthsAgo, 120);
-
-        const p = structuralPart + softTissuePart + degenerativePart;
+        const p = structuralPart + softTissuePart;
         c.imagingMax = Math.max(c.imagingMax, p);
     }
 
     let orthoPenalty = 0;
     for (const c of chains.values()) {
         const chainCore = Math.max(c.injuryMax, c.surgeryMax, c.imagingMax);
-        orthoPenalty += chainCore + c.incremental;
+        orthoPenalty += chainCore;
     }
 
     // Change 9: Updated redFlagPenalty values to match specification table
@@ -582,17 +582,29 @@ export function calculateMSI(facts, asOfDateStr) {
         for (const s of bySeason) {
             const yearsAgo = Math.max(0, baseYear - (s.season || baseYear));
             const recencyFactor = Math.pow(0.8, yearsAgo);
-            const mg = s.missedGames || 0;
-            // Change 11 (revised): Sum missed games penalty + practice/limited week penalties first,
-            //   then multiply the entire season total by recencyFactor (0.8^yearsAgo)
             const practiceWeeksMissed = s.missedPracticeWeeks || 0;
-            const seasonRaw = (1.5 * Math.min(mg, 8) + 0.6 * Math.max(mg - 8, 0))
+
+            // New formula: use firstGamesMissed + additionalGamesMissed + lastGamesMissed if available.
+            // lastGamesMissed <= 8 → penalty = 1.5 × lastGamesMissed
+            // firstGamesMissed + additionalGamesMissed → penalty = 0.6 × (first + additional)
+            // Falls back to old formula (1.5 × min(mg,8) + 0.6 × rest) if new fields absent.
+            let missedGamesPenalty;
+            if (s.lastGamesMissed !== undefined || s.firstGamesMissed !== undefined || s.additionalGamesMissed !== undefined) {
+                const last = Math.max(0, s.lastGamesMissed || 0);
+                const firstAndAdditional = Math.max(0, (s.firstGamesMissed || 0) + (s.additionalGamesMissed || 0));
+                missedGamesPenalty = (last <= 8 ? 1.5 * last : 1.5 * 8 + 0.6 * (last - 8))
+                    + 0.6 * firstAndAdditional;
+            } else {
+                const mg = s.missedGames || 0;
+                missedGamesPenalty = 1.5 * Math.min(mg, 8) + 0.6 * Math.max(mg - 8, 0);
+            }
+
+            const seasonRaw = missedGamesPenalty
                 + 0.5 * practiceWeeksMissed
                 + 0.25 * (s.limitedParticipationWeeks || 0);
             rawMissedGamesPenalty += seasonRaw * recencyFactor;
 
-            // Change 12: Load-manage flag — player missed >6 practice weeks
-            const gamesPlayed = s.gamesPlayed || 0;
+            // Load-manage flag — player missed >6 practice weeks
             if (practiceWeeksMissed > 6) {
                 loadManagePenalty += 2.5 * recencyFactor;
             }
@@ -696,9 +708,18 @@ export function calculateMSI(facts, asOfDateStr) {
         neuroPenalty += p;
     }
 
-    // Compute recency boost from symptomatic events only (injuries/surgeries that are active,
-    // and imaging findings only when they map to a symptomatic injury by bodyRegion+side).
-    // Purely incidental/asymptomatic imaging findings do NOT trigger the boost.
+    // ── Recency Boost ────────────────────────────────────────────────────────
+    // Sources:
+    //   1. Injuries that are Symptomatic or Ongoing  → contribute their monthsAgo
+    //   2. All surgeries                             → contribute their monthsAgo
+    //   3. Imaging findings that are NOT part of any injury/surgery chain (purely
+    //      incidental/standalone):
+    //        • > 12 months from asOf  → multiplier = 1 (no contribution)
+    //        • ≤ 12 months, asymptomatic → multiplier = 1 (no contribution)
+    //        • ≤ 12 months, symptomatic  → contribute monthsAgo (multiplier 1–1.25×)
+    //      "Symptomatic" for a standalone imaging finding = has any significant
+    //      soft-tissue or structural finding in structuredFindings.
+    // ─────────────────────────────────────────────────────────────────────────
     const symptomaticMonthsAgo = [];
 
     // 1. Injuries that are currently Symptomatic or Ongoing
@@ -713,16 +734,40 @@ export function calculateMSI(facts, asOfDateStr) {
         if (sx?.date) symptomaticMonthsAgo.push(monthsBetween(sx.date, asOf));
     }
 
-    // 3. Imaging findings — only if they correspond to a symptomatic injury (same bodyRegion + side)
-    const symptomaticInjuryKeys = new Set(
-        injuries
-            .filter(inj => inj.currentStatus === 'Symptomatic' || inj.currentStatus === 'Ongoing')
-            .map(inj => `${inj.bodyRegion}|${inj.side}`)
-    );
+    // 3. Standalone imaging findings only (NOT part of any injury/surgery chain)
+    //    A finding is "symptomatic" if it has any non-trivial structured finding.
+    function isImagingFindingSymptomatic(sf) {
+        if (!sf) return false;
+        if (sf.stressReactionOrFracture) return true;
+        if (sf.looseBodies) return true;
+        if (sf.nonunionOrDelayedUnion) return true;
+        if (sf.avascularNecrosisConcern) return true;
+        if (sf.postTraumaticArthritis) return true;
+        const lm = (sf.labrumMeniscusStatus || '').toLowerCase();
+        if (lm === 'confirmedretear' || lm === 'possibleretear') return true;
+        const ten = (sf.tendonStatus || '').toLowerCase();
+        if (ten === 'fulltear' || ten === 'partialtear') return true;
+        const lig = (sf.ligamentStatus || '').toLowerCase();
+        if (lig === 'tear' || lig === 'spraingrade2') return true;
+        const eff = (sf.effusion || '').toLowerCase();
+        if (eff === 'large' || eff === 'moderate') return true;
+        const hw = (sf.hardwareComplication || '').toLowerCase();
+        if (hw === 'broken' || hw === 'migration' || hw === 'lucency') return true;
+        return false;
+    }
+
     for (const img of imgs) {
-        if (img?.date && symptomaticInjuryKeys.has(`${img.bodyRegion}|${img.side}`)) {
-            symptomaticMonthsAgo.push(monthsBetween(img.date, asOf));
-        }
+        if (!img?.date) continue;
+        const imgChainId = imagingChainKey(img);
+        // Only consider findings that are NOT part of any established injury/surgery chain
+        if (chains.has(imgChainId)) continue;
+        const monthsAgo = monthsBetween(img.date, asOf);
+        // > 12 months → multiplier 1, no boost contribution
+        if (monthsAgo > 12) continue;
+        // ≤ 12 months but asymptomatic → multiplier 1, no boost contribution
+        if (!isImagingFindingSymptomatic(img?.structuredFindings)) continue;
+        // ≤ 12 months and symptomatic → contributes to boost (1–1.25×)
+        symptomaticMonthsAgo.push(monthsAgo);
     }
 
     const monthsSinceLast = symptomaticMonthsAgo.length > 0
@@ -760,6 +805,7 @@ export function calculateMSI(facts, asOfDateStr) {
             redFlagPenalty: +validRedFlagPenalty.toFixed(1),
             availabilityPenalty: +(validAvailabilityPenalty + validRestrictionPenalty).toFixed(1),
             neuroPenalty: +validNeuroPenalty.toFixed(1),
+            totalBasePenalty: +(validOrthoPenalty + validRedFlagPenalty + validAvailabilityPenalty + validRestrictionPenalty + validNeuroPenalty).toFixed(1),
             recentBoostMultiplier: +(1 + validRecentBoost).toFixed(3),
             totalPenalty: +validTotalPenalty.toFixed(1)
         }
