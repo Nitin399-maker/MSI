@@ -209,6 +209,20 @@ document.getElementById('uploadFilesBtn').addEventListener('click', async () => 
         progressText.textContent = `Analyzing ${files.length} document(s) with AI...`;
         progressBar.style.width = '60%';
         const analysis = await analyzeMedicalDocuments(documentsData, '');
+        
+        // Filter: Remove imaging scan findings (MRI/XR/CT/US) from injuries — they belong only in imagingFindings
+        if (analysis.injuries) {
+            analysis.injuries = analysis.injuries.filter(inj => {
+                const injNameLower = (inj.injuryName || '').toLowerCase();
+                // Remove if injury name is just a scan modality name without clinical context
+                if (/^(mri|xr|x-ray|ct|ultrasound|us)\s*(scan|imaging|finding)?$/i.test(injNameLower)) {
+                    return false; // exclude pure scan entries
+                }
+                // Keep clinically significant injuries
+                return true;
+            });
+        }
+        
         // Step 3: Create or update player
         progressText.textContent = 'Creating player profile...';
         progressBar.style.width = '90%';
@@ -249,15 +263,49 @@ document.getElementById('uploadFilesBtn').addEventListener('click', async () => 
         // Validate flags based on actual imaging findings
         if (!player.facts.flags) player.facts.flags = {};
         const imgs = player.facts.imagingFindings || [];
-        player.facts.flags.cartilageDegeneration = imgs.some(img => 
-            img.structuredFindings?.cartilageDamage && 
-            !['None', 'Unknown'].includes(img.structuredFindings.cartilageDamage)
-        );
-        player.facts.flags.looseBodies = imgs.some(img => img.structuredFindings?.looseBodies === true);
-        player.facts.flags.osteoarthritisOrArthrosis = imgs.some(img => 
-            img.structuredFindings?.degenerativeChange && 
+        // cartilageDegeneration used to be a boolean; we now store the severity string if available
+        player.facts.flags.cartilageDegeneration = (() => {
+            const values = imgs
+                .map(img => img.structuredFindings?.cartilageDamage)
+                .filter(v => v && !['None', 'Unknown'].includes(v));
+            if (values.length === 0) {
+                // Fall back to LLM-supplied value if imaging sub-fields have nothing
+                return player.facts.flags.cartilageDegeneration || false;
+            }
+            // pick the worst/most severe description based on a priority list
+            const priority = [
+                'full thickness', 'full', 'grade iv', 'tricompartmental',
+                'severe', 'grade iii', 'patellofemoral',
+                'moderate', 'lateral', 'grade ii',
+                'mild', 'grade i', 'medial'
+            ];
+            for (const p of priority) {
+                const match = values.find(v => v.toLowerCase().includes(p));
+                if (match) return match;
+            }
+            return values[0];
+        })();
+        player.facts.flags.looseBodies = imgs.some(img => img.structuredFindings?.looseBodies === true)
+            || player.facts.flags.looseBodies === true;
+        // Derive osteoarthritis from imaging; fall back to LLM-supplied value
+        const imagingOA = imgs.some(img =>
+            img.structuredFindings?.degenerativeChange &&
             ['Moderate', 'Severe'].includes(img.structuredFindings.degenerativeChange)
         ) || imgs.some(img => img.structuredFindings?.postTraumaticArthritis === true);
+        player.facts.flags.osteoarthritis = imagingOA || player.facts.flags.osteoarthritis === true;
+        // Derive other boolean flags — fall back to LLM-supplied value when imaging sub-fields absent
+        const imagingDerived = {
+            fractureNonunionOrDelayedUnion: imgs.some(img => img.structuredFindings?.fractureNonunionOrDelayedUnion === true),
+            avascularNecrosisConcern:        imgs.some(img => img.structuredFindings?.avascularNecrosisConcern === true),
+            hardwareFailureOrBrokenImplant:  imgs.some(img => img.structuredFindings?.hardwareComplication === 'HardwareFailure'),
+            stressFractureHistory:           imgs.some(img => img.structuredFindings?.stressReactionOrFracture === true),
+        };
+        for (const [key, imgVal] of Object.entries(imagingDerived)) {
+            player.facts.flags[key] = imgVal || player.facts.flags[key] === true;
+        }
+        // recurrentInstability, recurrentMuscleStrain, kineticChainMuscleStrain,
+        // recurrentMuscleStrainDifferentMuscle are purely clinical — LLM value is authoritative.
+        // No imaging override needed; they pass through untouched.
         // Add all documents to player
         for (const docData of documentsData) {
             player.documents.push({filename: docData.filename,docType: docData.docType,
@@ -556,38 +604,127 @@ function renderPlayerDashboard(playerId) {
                             if (t === 'oa') return sf.postTraumaticArthritis || sf.degenerativeChange;
                             if (t === 'instability') return (img.imaging?.finding || '').toLowerCase().includes('instab');
                             if (t === 'stress') return sf.stressReactionOrFracture;
+                            if (t === 'nonunion') return sf.nonunionOrDelayedUnion;
+                            if (t === 'avn') return sf.avascularNecrosisConcern;
+                            if (t === 'hardware') return sf.hardwareComplication && sf.hardwareComplication !== 'None' && sf.hardwareComplication !== 'Unknown';
                             return false;
                         });
                     }).map(i => i.date).filter(Boolean).sort();
                     return matches.length > 0 ? matches[0] : null;
                 };
 
+                // helpers for conditions list
+                const determineSeverity = flagVal => {
+                    if (typeof flagVal === 'string' && flagVal.trim() !== '') return flagVal;
+                    return 'Serious'; // default when no explicit severity
+                };
+                const descFromImg = predicate => {
+                    const img = imaging.find(predicate);
+                    if (!img) return null;
+                    return img.imaging?.finding || img.sourceDoc || null;
+                };
+
                 const conditions = [];
-                if (flags.cartilageDegeneration) conditions.push({
-                    label: 'Cartilage Degeneration', color: '#8B0000', textColor: '#fff',
-                    severity: 'Serious', date: findEarliestDate(['cartilage']),
-                    desc: 'Structural breakdown of joint cartilage — long-term joint health concern'
-                });
-                if (flags.looseBodies) conditions.push({
-                    label: 'Loose Bodies', color: '#8B0000', textColor: '#fff',
-                    severity: 'Serious', date: findEarliestDate(['loose']),
-                    desc: 'Intra-articular loose fragments that may cause mechanical symptoms'
-                });
-                if (flags.osteoarthritisOrArthrosis) conditions.push({
-                    label: 'Osteoarthritis / Arthrosis', color: '#CC3300', textColor: '#fff',
-                    severity: 'Serious', date: findEarliestDate(['oa']),
-                    desc: 'Degenerative joint disease — progressive wear of articular surfaces'
-                });
-                if (flags.recurrentInstability) conditions.push({
-                    label: 'Recurrent Instability', color: '#FF8C00', textColor: '#fff',
-                    severity: 'Moderate', date: findEarliestDate(['instability']),
-                    desc: 'Repeated episodes of joint instability affecting performance and injury risk'
-                });
-                if (flags.stressFractureHistory) conditions.push({
-                    label: 'Stress Fracture History', color: '#FF8C00', textColor: '#fff',
-                    severity: 'Moderate', date: findEarliestDate(['stress']),
-                    desc: 'Prior stress fracture indicating elevated bone stress risk'
-                });
+                if (flags.cartilageDegeneration) {
+                    conditions.push({
+                        label: 'Cartilage Degeneration', color: '#8B0000', textColor: '#fff',
+                        severity: determineSeverity(flags.cartilageDegeneration),
+                        date: findEarliestDate(['cartilage']),
+                        desc: descFromImg(img => img.structuredFindings?.cartilageDamage && !['None','Unknown'].includes(img.structuredFindings.cartilageDamage)) ||
+                              'Structural breakdown of joint cartilage — long-term joint health concern'
+                    });
+                }
+                if (flags.looseBodies) {
+                    conditions.push({
+                        label: 'Loose Bodies', color: '#8B0000', textColor: '#fff',
+                        severity: determineSeverity(flags.looseBodies),
+                        date: findEarliestDate(['loose']),
+                        desc: descFromImg(img => img.structuredFindings?.looseBodies === true) ||
+                              'Intra-articular loose fragments that may cause mechanical symptoms'
+                    });
+                }
+                if (flags.osteoarthritis) {
+                    conditions.push({
+                        label: 'Osteoarthritis / Arthrosis', color: '#CC3300', textColor: '#fff',
+                        severity: determineSeverity(flags.osteoarthritis),
+                        date: findEarliestDate(['oa']),
+                        desc: descFromImg(img => (img.structuredFindings?.degenerativeChange && ['Moderate','Severe'].includes(img.structuredFindings.degenerativeChange)) || img.structuredFindings?.postTraumaticArthritis) ||
+                              'Degenerative joint disease — progressive wear of articular surfaces'
+                    });
+                }
+                if (flags.recurrentInstability) {
+                    conditions.push({
+                        label: 'Recurrent Instability', color: '#FF8C00', textColor: '#fff',
+                        severity: determineSeverity(flags.recurrentInstability),
+                        date: findEarliestDate(['instability']),
+                        desc: descFromImg(img => (img.imaging?.finding || '').toLowerCase().includes('instab')) ||
+                              'Repeated episodes of joint instability affecting performance and injury risk'
+                    });
+                }
+                if (flags.stressFractureHistory) {
+                    conditions.push({
+                        label: 'Stress Fracture History', color: '#FF8C00', textColor: '#fff',
+                        severity: determineSeverity(flags.stressFractureHistory),
+                        date: findEarliestDate(['stress']),
+                        desc: descFromImg(img => img.structuredFindings?.stressReactionOrFracture) ||
+                              'Prior stress fracture indicating elevated bone stress risk'
+                    });
+                }
+                // muscle strain related chronic conditions
+                if (flags.recurrentMuscleStrain) {
+                    conditions.push({
+                        label: 'Recurrent Muscle Strain', color: '#FF8C00', textColor: '#fff',
+                        severity: determineSeverity(flags.recurrentMuscleStrain),
+                        date: null,
+                        desc: 'Multiple episodes of muscle strain within the same muscle or location'
+                    });
+                }
+                if (flags.kineticChainMuscleStrain) {
+                    conditions.push({
+                        label: 'Kinetic Chain Muscle Strain', color: '#FF8C00', textColor: '#fff',
+                        severity: determineSeverity(flags.kineticChainMuscleStrain),
+                        date: null,
+                        desc: 'Associated muscle strain occurring in a linked kinetic chain region'
+                    });
+                }
+                if (flags.recurrentMuscleStrainDifferentMuscle) {
+                    conditions.push({
+                        label: 'Recurrent Muscle Strain (Different Muscle)', color: '#FF8C00', textColor: '#fff',
+                        severity: determineSeverity(flags.recurrentMuscleStrainDifferentMuscle),
+                        date: null,
+                        desc: 'Multiple muscle strains affecting different muscle groups'
+                    });
+                }
+                // additional chronic imaging flags
+                if (flags.fractureNonunionOrDelayedUnion) {
+                    conditions.push({
+                        label: 'Fracture Nonunion / Delayed Union', color: '#FF8C00', textColor: '#fff',
+                        severity: determineSeverity(flags.fractureNonunionOrDelayedUnion),
+                        date: findEarliestDate(['nonunion']),
+                        desc: descFromImg(img => img.structuredFindings?.nonunionOrDelayedUnion) ||
+                              'Evidence of nonunion or delayed fracture healing'
+                    });
+                }
+                if (flags.avascularNecrosisConcern) {
+                    conditions.push({
+                        label: 'Avascular Necrosis Concern', color: '#FF8C00', textColor: '#fff',
+                        severity: determineSeverity(flags.avascularNecrosisConcern),
+                        date: findEarliestDate(['avn']),
+                        desc: descFromImg(img => img.structuredFindings?.avascularNecrosisConcern) ||
+                              'Concern for avascular necrosis on imaging'
+                    });
+                }
+                if (flags.hardwareFailureOrBrokenImplant) {
+                    conditions.push({
+                        label: 'Hardware Failure / Broken Implant', color: '#FF8C00', textColor: '#fff',
+                        severity: determineSeverity(flags.hardwareFailureOrBrokenImplant),
+                        date: findEarliestDate(['hardware']),
+                        desc: descFromImg(img => img.structuredFindings?.hardwareComplication &&
+                                                  img.structuredFindings.hardwareComplication !== 'None' &&
+                                                  img.structuredFindings.hardwareComplication !== 'Unknown') ||
+                              'Evidence of hardware complication or implant failure'
+                    });
+                }
                 if (conditions.length === 0) return `
                     <div class="d-flex align-items-center gap-2 p-2 rounded" style="background:#f0fff0;border:1px solid #228B22;">
                         <i class="bi bi-check-circle-fill" style="color:#228B22;"></i>
@@ -726,9 +863,11 @@ function renderPlayerDashboard(playerId) {
                 const outcomeBg = (res === 'None') ? '#228B22' :
                                   (res === 'Severe') ? '#8B0000' :
                                   (res === 'Moderate') ? '#FF8C00' : '#DAA520';
+                // Keep full procedure name for display
+                const procName = surg.procedure || 'Unknown';
                 return `
                 <tr class="surgery-row-${playerId}-${i}" style="cursor: pointer; border-bottom: 1px solid #dee2e6;" onclick="toggleSurgeryDetails(${playerId}, ${i})">
-                    <td>${(surg.procedure || 'Unknown').replace(/,?\s*(left|right|bilateral|right shoulder|left shoulder|right knee|left knee|right hip|left hip|right ankle|left ankle|right elbow|left elbow|right wrist|left wrist)\b.*/i, '').trim()}</td>
+                    <td>${procName}</td>
                     <td>${surg.bodyRegion || 'Unknown'} ${surg.side !== 'NA' ? `(${surg.side})` : ''}</td>
                     <td>${formatDate(surg.date)}</td>
                     <td>
@@ -898,7 +1037,8 @@ function renderPlayerDashboard(playerId) {
 
             const timelineHtml = [...dateGroups.entries()].sort((a,b)=>new Date(b[0])-new Date(a[0])).map(([date, events]) => {
                 const isLinked = events.length > 1 && events.some(e=>e.type==='injury') && events.some(e=>e.type==='surgery');
-                const groupWrapper = isLinked ? 'border rounded p-2 mb-3' : 'mb-3';
+                const groupWrapper = isLinked ? 'rounded p-2 mb-3' : 'mb-3';
+                const groupStyle = isLinked ? 'style="border:2px solid #6f42c1;background:#fdfcff;"' : '';
                 const itemsHtml = events.map((event, idx) => {
                     const tlId = `tl-${playerId}-${date.replace(/\W/g,'')}-${idx}`;
                     const summaryLine = event.clinicalSummary
@@ -935,7 +1075,14 @@ function renderPlayerDashboard(playerId) {
                     `;
                 }).join(isLinked ? '<div class="my-2" style="border-top:1px dashed #ccc;opacity:0.5;"></div>' : '');
 
-                return `<div class="${groupWrapper}">${isLinked ? `<div class="text-muted small mb-1"><i class="bi bi-link-45deg me-1"></i>Linked events on ${formatDate(date)}</div>` : ''}${itemsHtml}</div>`;
+                const groupHeader = isLinked
+                    ? `<div class="d-flex align-items-center gap-2 px-2 py-1 mb-2 rounded" style="background:linear-gradient(90deg,#e8f0fe,#f5f0ff);border-left:4px solid #6f42c1;">
+                           <i class="bi bi-link-45deg text-primary fs-5"></i>
+                           <span class="fw-semibold" style="color:#6f42c1;font-size:0.85rem;">Injury &amp; Surgery on same date</span>
+                           <span class="badge ms-auto" style="background:#6f42c1;color:#fff;font-size:0.75rem;">${formatDate(date)}</span>
+                       </div>`
+                    : '';
+                return `<div class="${groupWrapper}" ${groupStyle}>${groupHeader}${itemsHtml}</div>`;
             }).join('');
 
             return `${legend}<div class="timeline">${timelineHtml}</div>`;
@@ -973,7 +1120,8 @@ function renderPlayerDashboard(playerId) {
             if (sf.stressReactionOrFracture || (sf.cartilageDamage && /moderate/i.test(sf.cartilageDamage)) ||
                 (sf.hardwareComplication && sf.hardwareComplication !== 'None' && sf.hardwareComplication !== 'Unknown') ||
                 (sf.degenerativeChange && /severe|moderate/i.test(sf.degenerativeChange))) return 'Moderate';
-            if (sf.effusion || sf.tendonStatus || sf.ligamentStatus || sf.labrumMeniscusStatus || sf.degenerativeChange) return 'Mild';
+            // Only return Mild if there are actual displayable findings (not just Unknown/Normal placeholders)
+            if (renderSFList(sf).length > 0) return 'Mild';
             return 'Normal';
         };
 
@@ -1057,7 +1205,6 @@ function renderPlayerDashboard(playerId) {
                     return `
                         <tr style="background:#fdfdfd;">
                             <td class="ps-4 text-muted small">${mod}</td>
-                            <td class="text-muted small">${formatDate(scan.date)}</td>
                             <td colspan="2">
                                 ${scan.imaging?.finding ? `<p class="mb-1 small"><em>${scan.imaging.finding}</em></p>` : ''}
                                 ${sfLines.length ? `<div class="small">${sfLines.map(l => {
@@ -1078,7 +1225,6 @@ function renderPlayerDashboard(playerId) {
                     <td>
                         <strong>${regionLabel}</strong>
                     </td>
-                    <td class="text-muted small">${formatDate(latest.date)}</td>
                     <td>
                         <span class="badge me-1" style="background-color:${worstSeverityHex};color:#fff;">${worstSeverityLabel}</span>
                         <span class="text-muted small">${summaryFindings || 'No significant findings'}</span>
@@ -1087,10 +1233,10 @@ function renderPlayerDashboard(playerId) {
                     <td class="text-center"><i class="bi bi-chevron-down" id="chev-${expandId}" style="font-size:0.85rem;"></i></td>
                 </tr>
                 <tr id="${expandId}" style="display:none;background:#f8f9fa;">
-                    <td colspan="5" class="p-0">
+                    <td colspan="4" class="p-0">
                         <table class="table table-sm mb-0">
                             <thead style="background:#e9ecef;"><tr>
-                                <th class="ps-4">Modality</th><th>Date</th><th colspan="2">Findings &amp; Impression</th>
+                                <th class="ps-4">Modality</th><th colspan="2">Findings &amp; Impression</th>
                             </tr></thead>
                             <tbody>${expandedRows}</tbody>
                         </table>
@@ -1119,7 +1265,6 @@ function renderPlayerDashboard(playerId) {
             <table class="table table-sm table-hover mb-0">
                 <thead class="table-light"><tr>
                     <th>Body Part</th>
-                    <th>Latest Scan</th>
                     <th>Structured Findings Summary</th>
                     <th>Modalities</th>
                     <th style="width:40px;"></th>
@@ -1354,6 +1499,10 @@ function renderCompareTable() {
                 aVal = a.score || 0;
                 bVal = b.score || 0;
                 break;
+            case 'mmi':
+                aVal = a.mmi || 0;
+                bVal = b.mmi || 0;
+                break;
             default:
                 return 0;
         }
@@ -1375,10 +1524,13 @@ function renderCompareTable() {
         const imagingFlags = [];
         if (flags.cartilageDegeneration) imagingFlags.push('Cartilage');
         if (flags.looseBodies) imagingFlags.push('Loose Bodies');
-        if (flags.osteoarthritisOrArthrosis) imagingFlags.push('Arthritis');
+        if (flags.osteoarthritis) imagingFlags.push('Arthritis');
         if (flags.fractureNonunionOrDelayedUnion) imagingFlags.push('Nonunion');
         if (flags.avascularNecrosisConcern) imagingFlags.push('AVN');
         if (flags.hardwareFailureOrBrokenImplant) imagingFlags.push('Hardware');
+        if (flags.recurrentMuscleStrain) imagingFlags.push('Recurrent Strain');
+        if (flags.kineticChainMuscleStrain) imagingFlags.push('Kinetic Chain Strain');
+        if (flags.recurrentMuscleStrainDifferentMuscle) imagingFlags.push('Recurrent Strain (Different)');
         if ((counts.cervicalNeurologicEventsTotal || 0) > 0) imagingFlags.push('Cervical');
         const row = document.createElement('tr');
         row.innerHTML = `
@@ -1392,6 +1544,13 @@ function renderCompareTable() {
             </td>
             <td>${counts.missedGamesTotal || 0}</td>
             <td><span class="badge bg-${scoreInfo.badge} fs-6">${isNaN(p.score) ? 'N/A' : p.score}</span></td>
+            <td>${(() => {
+                const mmiScore = p.mmi ?? null;
+                if (mmiScore === null) return '<span class="text-muted">N/A</span>';
+                const mmiBadge = mmiScore >= 15 ? 'danger' : mmiScore >= 5 ? 'warning' : 'success';
+                const mmiLabel = p.mmiBreakdown?.managementLevel || (mmiScore >= 15 ? 'High' : mmiScore >= 5 ? 'Moderate' : 'Low');
+                return `<span class="badge bg-${mmiBadge} fs-6">${mmiScore}</span> <small class="text-muted">${mmiLabel}</small>`;
+            })()}</td>
         `;
         tbody.appendChild(row);
     });
@@ -1439,7 +1598,7 @@ document.getElementById('exportPDF').addEventListener('click', (e) => {
             const imagingFlags = [];
             if (flags.cartilageDegeneration) imagingFlags.push('Cartilage');
             if (flags.looseBodies) imagingFlags.push('Loose Bodies');
-            if (flags.osteoarthritisOrArthrosis) imagingFlags.push('Arthritis');
+            if (flags.osteoarthritis) imagingFlags.push('Arthritis');
             if (flags.fractureNonunionOrDelayedUnion) imagingFlags.push('Nonunion');
             if (flags.avascularNecrosisConcern) imagingFlags.push('AVN');
             if (flags.hardwareFailureOrBrokenImplant) imagingFlags.push('Hardware');

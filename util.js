@@ -38,10 +38,9 @@ Extract and return ONLY a valid JSON object with the following structure (no mar
     "minorInjuriesTotal": 0
   },
   "flags": {
-    "cartilageDegeneration": "None|Mild|Moderate|Severe|Full",
+    "cartilageDegeneration": "None|Mild|Grade I|Medial|Moderate|Lateral|Grade II|Severe|Grade III|Patellofemoral|Full|Full thickness|Grade IV|Tricompartmental",
     "looseBodies": false,
-    "effusionRecurrentOrModerate": false,
-    "osteoarthritisOrArthrosis": false,
+    "osteoarthritis": false,
     "stressFractureHistory": false,
     "fractureNonunionOrDelayedUnion": false,
     "avascularNecrosisConcern": false,
@@ -140,17 +139,10 @@ Extract and return ONLY a valid JSON object with the following structure (no mar
       "structure": "string (e.g., ACL, rotator cuff, meniscus — REQUIRED, use 'Unknown' if not specified)",
       "sourceDoc": "string",
       "structuredFindings": {
-        "degenerativeChange": "None|Mild|Moderate|Severe|Unknown",
-        "cartilageDamage": "None|Mild|Moderate|Severe|FullThickness|Unknown",
         "labrumMeniscusStatus": "Normal|PostOpNoRetear|PossibleRetear|ConfirmedRetear|Unknown",
         "tendonStatus": "Normal|Tendinosis or tendinopathy|PartialTear|FullTear|Unknown",
         "ligamentStatus": "Normal|SprainLowGrade|SprainGrade2|Tear|ReconstructionIntact|Unknown",
         "effusion": "None|Trace|Moderate|Large|Unknown",
-        "looseBodies": false,
-        "nonunionOrDelayedUnion": false,
-        "avascularNecrosisConcern": false,
-        "hardwareComplication": "None|Lucency|Broken|Migration|Unknown",
-        "postTraumaticArthritis": false,
         "stressReactionOrFracture": false
       },
       "imaging": {
@@ -429,56 +421,57 @@ export function calculateMSI(facts, asOfDateStr) {
     const counts = facts?.summaryCounts || {};
     const scoringInputs = facts?.scoringInputs || {};
 
+    function getNormalizedChainId(item) {
+        const region = (item?.region || "").toLowerCase().trim();
+        const side = (item?.side || "").toLowerCase().trim();
+        const structure = (item?.structure || "").toLowerCase().trim();
+    
+    // This creates a unique but shared key like: "hipgroin|left|core muscle"
+        return `${region}|${side}|${structure}`;
+    }
+
     const chains = new Map();
+
     function ensure(chainId) {
-        if (!chains.has(chainId)) chains.set(chainId, { injuryMax: 0, surgeryMax: 0, imagingMax: 0 });
+        if (!chains.has(chainId)) {
+            chains.set(chainId, { injuryMax: 0, surgeryMax: 0, imagingMax: 0 });
+        }
         return chains.get(chainId);
     }
 
+// --- STEP 1: INJURIES ---
     for (const inj of injuries) {
-        const chainId = buildChainIdForInjury(inj);
+        const chainId = getNormalizedChainId(inj);
         const c = ensure(chainId);
 
         const monthsAgo = inj?.date ? monthsBetween(inj.date, asOf) : 24;
-        // Change 8 (revised): Use "Acceptable for 50% reduction" column values instead of Half-Life:
-        //   Major/Severe injury: 24mo, Moderate injury: 12mo, Minor/Mild injury: 6mo
         const sev = (inj?.severity || "").toLowerCase();
         const hl = (sev === "major" || sev === "severe") ? 24 : (sev === "moderate" ? 12 : 6);
-        // Change 2: Pass monthsAgo to typeMultiplier for fracture time-based multiplier
+    
         let p = sevWeight(inj?.severity) * typeMultiplier(inj?.type, monthsAgo) * decay(monthsAgo, hl);
-
         if (inj?.treatment?.surgery) p *= 0.35;
 
         c.injuryMax = Math.max(c.injuryMax, p);
     }
 
-    // Change 5: Count Aspiration and/or Injection procedures for multiplier logic
-    const aspirationCount = surgeries.filter(sx =>
-        (sx?.procedureCategory || "").toLowerCase().trim() === "aspiration and/or injection"
-    ).length;
+// --- STEP 2: SURGERIES ---
+    const aspirationCount = surgeries.filter(sx =>(sx?.procedureCategory || "").toLowerCase().trim() === "aspiration and/or injection").length;
 
     for (const sx of surgeries) {
-        const chainId = buildChainIdForSurgery(sx);
+        const chainId = getNormalizedChainId(sx);
         const c = ensure(chainId);
 
         const monthsAgo = sx?.date ? monthsBetween(sx.date, asOf) : 60;
-        // Change 8 (revised): Use "Acceptable for 50% reduction" column values:
-        //   Major Joint Surgery: 36mo, Standard Surgery: 24mo
         const hl = sx?.majorJoint ? 36 : 24;
-
         const base = sx?.majorJoint ? 6 : 4;
 
-        // Change 3 & 5: Pass monthsAgo to procedureMultiplier; handle Aspiration sentinel
         let procMult = procedureMultiplier(sx?.procedureCategory, monthsAgo);
         if (procMult === null) {
-            // Change 5: Aspiration and/or Injection — count<2 => 0.5x, count>=2 => 0.75x
             procMult = aspirationCount <= 2 ? 0.5 : 0.75;
         }
 
-        // Change 6: revision adds 3 pts; if revisionCount (from LLM) >= 2, add 6 pts bonus
         const revision = sx?.revision ? 3 : 0;
-        const secondRevisionBonus = (sx?.revisionCount != null ? sx.revisionCount : 0) >= 2 ? 6 : 0;
-
+        const secondRevisionBonus = (sx?.revisionCount || 0) >= 2 ? 6 : 0;
         const residual = residualPenalty(sx?.outcome?.residualSymptoms);
         const limitation = limitationPenalty(sx?.outcome?.currentLimitation);
 
@@ -487,36 +480,35 @@ export function calculateMSI(facts, asOfDateStr) {
         c.surgeryMax = Math.max(c.surgeryMax, p);
     }
 
+// --- STEP 3: IMAGING (Filtered) ---
     for (const img of imgs) {
-        const chainId = imagingChainKey(img);
-        // Only score imaging if it belongs to an existing injury or surgery chain.
-        // Purely incidental findings with no matching injury/surgery are excluded entirely.
-        if (!chains.has(chainId)) continue;
+        const chainId = getNormalizedChainId(img);
+
+        // CRITICAL FIX: Only process if a bucket was ALREADY created by an injury or surgery
+        if (!chains.has(chainId)) continue; 
+        
         const c = chains.get(chainId);
-
         const monthsAgo = img?.date ? monthsBetween(img.date, asOf) : 24;
-
         const sf = img?.structuredFindings || {};
-        // Change 7: Structural imaging only counts Stress Reaction or Fracture = 3.0 pts
-        //   All other structural flags (nonunion, AVN, hardware, loose bodies) removed from imaging loop
-        //   and handled exclusively through redFlagPenalty
+
         const structural = sf.stressReactionOrFracture ? 3 : 0;
-        // Change 8 (revised): Structural Imaging uses "Acceptable" value = 36 months
         const structuralPart = structural * decay(monthsAgo, 36);
 
-        // Change 8 (revised): Major/Soft Tissue imaging uses "Acceptable" value = 24 months
-        const softTissuePart =
-            (labrumMeniscusPenalty(sf.labrumMeniscusStatus) +
-             tendonPenalty(sf.tendonStatus) +
-             ligamentPenalty(sf.ligamentStatus) +
-             effusionPenalty(sf.effusion)) * decay(monthsAgo, 24);
+        const softTissuePart = (
+            labrumMeniscusPenalty(sf.labrumMeniscusStatus) +
+            tendonPenalty(sf.tendonStatus) +
+            ligamentPenalty(sf.ligamentStatus) +
+            effusionPenalty(sf.effusion)
+        ) * decay(monthsAgo, 24);
 
         const p = structuralPart + softTissuePart;
         c.imagingMax = Math.max(c.imagingMax, p);
     }
 
+// --- STEP 4: FINAL CALCULATION ---
     let orthoPenalty = 0;
     for (const c of chains.values()) {
+        // This takes the single highest value for this specific body part issue
         const chainCore = Math.max(c.injuryMax, c.surgeryMax, c.imagingMax);
         orthoPenalty += chainCore;
     }
@@ -531,35 +523,67 @@ export function calculateMSI(facts, asOfDateStr) {
     // Hardware Failure / Broken Implant: 5.0 pts
     if (flags.hardwareFailureOrBrokenImplant) redFlagPenalty += 5.0;
     // Osteoarthritis: 3.0 pts
-    if (flags.osteoarthritisOrArthrosis) redFlagPenalty += 3.0;
+    if (flags.osteoarthritis) {redFlagPenalty += 3.0;
+        console.log("DEBUG: Osteoarthritis flag is true, adding 3 points to redFlagPenalty");
+    }
     // Change 10: cartilageDegeneration changed from boolean to severity string with graded penalty
     //   Full/Grade IV/Tricompartmental: 5 pts, Severe/Grade III/Patellofemoral: 3.5 pts,
     //   Moderate/Lateral/Grade II: 2 pts, Mild/Grade I/Medial: 1 pt
-    if (flags.cartilageDegeneration && typeof flags.cartilageDegeneration === 'string') {
-        const cd = flags.cartilageDegeneration.toLowerCase();
-        if (cd === "full" || cd === "full thickness" || cd === "grade iv" || cd === "tricompartmental") {
+    // Accept multiple flag shapes: string, boolean, or object with `severity`/`value`.
+    if (flags.cartilageDegeneration) {
+    let severityRaw = null;
+    
+    // Extract the string regardless of where it is hidden
+    if (typeof flags.cartilageDegeneration === 'string') {
+        severityRaw = flags.cartilageDegeneration;
+    } else if (typeof flags.cartilageDegeneration === 'object' && flags.cartilageDegeneration !== null) {
+        severityRaw = flags.cartilageDegeneration.severity || flags.cartilageDegeneration.value;
+    }
+
+    if (severityRaw) {
+        const cd = severityRaw.toLowerCase().trim();
+        console.log("DEBUG: cartilageDegeneration severityRaw =", severityRaw, "cd =", cd);
+        // Use /\b/ word-boundary style matching via exact token checks to avoid "grade i" matching "grade ii/iii/iv"
+        const isGradeIV = cd.includes("grade iv") || cd.includes("tricompartmental") || cd.includes("full");
+        const isGradeIII = !isGradeIV && (cd.includes("grade iii") || cd.includes("severe") || cd.includes("patellofemoral"));
+        const isGradeII = !isGradeIV && !isGradeIII && (cd.includes("grade ii") || cd.includes("moderate") || cd.includes("lateral"));
+        const isGradeI = !isGradeIV && !isGradeIII && !isGradeII && (/\bgrade\s*i\b/.test(cd) || cd.includes("mild") || cd.includes("medial"));
+        if (isGradeIV) {
+            console.log("DEBUG: Cartilage degeneration Grade IV/Full/Tricompartmental, adding 5 pts");
             redFlagPenalty += 5;
-        } else if (cd === "severe" || cd === "grade iii" || cd === "patellofemoral") {
+        } else if (isGradeIII) {
+            console.log("DEBUG: Cartilage degeneration Grade III/Severe, adding 3.5 pts");
             redFlagPenalty += 3.5;
-        } else if (cd === "moderate" || cd === "lateral" || cd === "grade ii") {
+        } else if (isGradeII) {
+            console.log("DEBUG: Cartilage degeneration Grade II/Moderate, adding 2 pts");
             redFlagPenalty += 2;
-        } else if (cd === "mild" || cd === "grade i" || cd === "medial") {
+        } else if (isGradeI) {
+            console.log("DEBUG: Cartilage degeneration Grade I/Mild, adding 1 pt");
             redFlagPenalty += 1;
-        } else if (flags.cartilageDegeneration) {
-            redFlagPenalty += 2; // default moderate if unrecognised string
+        } else {
+            console.log("DEBUG: Cartilage degeneration value not matched:", severityRaw);
         }
     } else if (flags.cartilageDegeneration === true) {
-        // Legacy boolean support — treat as moderate
-        redFlagPenalty += 2;
+        // boolean true → default Moderate
+        console.log("DEBUG: Cartilage degeneration boolean true, adding 2 pts");
+        redFlagPenalty += 2.0;
     }
+}
+    console.log("DEBUG: flags.looseBodies =", flags.looseBodies, typeof flags.looseBodies);
     // Loose Bodies: 2.0 pts
-    if (flags.looseBodies) redFlagPenalty += 2.0;
+    if (flags.looseBodies) {redFlagPenalty += 2.0;
+        console.log("DEBUG: Loose bodies flag is true, adding 2 points to redFlagPenalty");
+    }
     // Stress Fracture History: 3.0 pts
     if (flags.stressFractureHistory) redFlagPenalty += 3.0;
     // Recurrent Instability History: 3.5 pts
-    if (flags.recurrentInstability) redFlagPenalty += 3.5;
+    if (flags.recurrentInstability) {redFlagPenalty += 3.5;
+        console.log("DEBUG: Recurrent instability flag is true, adding 3.5 points to redFlagPenalty");
+    }
     // Change 9: Recurrent Muscle Strain (Same Muscle): 4.0 pts
-    if (flags.recurrentMuscleStrain) redFlagPenalty += 4.0;
+    if (flags.recurrentMuscleStrain) {redFlagPenalty += 4.0;
+        console.log("DEBUG: Recurrent muscle strain flag is true, adding 4 points to redFlagPenalty");
+    }
     // Change 9: Kinetic Chain / Associated Muscle Strain: 3.5 pts (new flag)
     if (flags.kineticChainMuscleStrain) redFlagPenalty += 3.5;
     // Change 9: Recurrent Muscle Strain (Different Muscle): 2.0 pts (new flag)
@@ -597,7 +621,7 @@ export function calculateMSI(facts, asOfDateStr) {
                     + 0.6 * firstAndAdditional;
             } else {
                 const mg = s.missedGames || 0;
-                missedGamesPenalty = 1.5 * Math.min(mg, 8) + 0.6 * Math.max(mg - 8, 0);
+                missedGamesPenalty = 0.6 * Math.max(0, mg - 8) + 1.5 * Math.min(mg, 8);
             }
 
             const seasonRaw = missedGamesPenalty
